@@ -5,3 +5,8 @@ Repository includes all needed STL files for 3D printed, non-3d printed parts, a
 
 
 
+## License
+
+GNU AFFERO GENERAL PUBLIC LICENSE
+
+CERN OHL version 1.2
