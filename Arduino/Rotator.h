@@ -132,6 +132,10 @@ class Rotator {
 	//extern volatile int az_state;
 	void AZStateChange();
 	void ELStateChange();
+	void MadgwickQuaternionUpdate(float, float, float, float, float, float, float, float, float);
+	void readLSM9DSO();
+	void printHeading(float, float);
+	void printOrientation(float, float, float);
 	//extern void stopIfFault();
 
 #endif

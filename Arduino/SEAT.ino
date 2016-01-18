@@ -1,5 +1,4 @@
 
-
 /* SEAT - Arduino Due Satellite Elevation & Azimuth Tracker
 
   Steven Kalmar
@@ -23,6 +22,7 @@
 #include <Adafruit_GPS.h>
 #include <rtc_clock.h>
 #include <Rotator.h>
+#include <Wire.h>
 
 
 
