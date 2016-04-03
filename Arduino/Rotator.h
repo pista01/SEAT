@@ -10,6 +10,7 @@ Azimuth control library
 #include "config.h"
 #include <DuePWM.h>
 #include "VNH5019MotorShield.h"
+#include <Adafruit_BNO055.h>
 //#include "PID_v1.h"
 
 
@@ -21,7 +22,7 @@ class Rotator {
  
   
   // PUBLIC METHODS
-   void init(void); 
+   void init(int, int, String); 
    void processPosition(void);
    void track(float,float);
    void park(void);
@@ -31,13 +32,24 @@ class Rotator {
    double get_az_target_deg(void);
    double get_el_current_deg(void);
    double get_el_target_deg(void);
-   double getAZEncoderCount(void);
-   double getELEncoderCount(void);
+   int getAZEncoderCount(void);
+   int getELEncoderCount(void);
    String getAZMotorCurrent(void);
    String getELMotorCurrent(void);
    String getAZDegPerSec(void);
    String getELDegPerSec(void);
    void CalculateNewPos(void);
+   void displaySensorOffsets(void);
+   void displayCalStatus(void);
+   void displaySensorStatus(void);
+   void displaySensorDetails(void);
+   void setSensorOffsets(String);
+   adafruit_bno055_offsets_t getSensorOffsets(void);
+   String getCalStatus(void);
+   void sanityCheckPosition(void);
+   boolean calibrateToZero(void);
+   
+   
    String get_PID(String);
    void set_new_PID(String, double, double, double);
    void enable_tracking(void);
@@ -46,7 +58,10 @@ class Rotator {
    void set_el_target_deg(float);
    boolean is_rot_tracking(void);
    boolean is_rot_parking(void);
+   boolean is_rot_moving(void);
    boolean is_az_parked;
+   float getMagHeading(void);
+   float getMagEL(void);
   
    
    
@@ -74,6 +89,7 @@ class Rotator {
 	boolean is_az_blocked;
 	boolean is_el_parking;
 	boolean is_tracking;
+	boolean is_calibrating;
 	int az_move_counter;
 	
 	unsigned long prev_set_time;
@@ -117,12 +133,13 @@ class Rotator {
 	double get_az_plus_360(void);
 	void stop_az_motor(void);
 	
+	
 	int AZ_motor_speed;
 	void stop_el_motor(void);
 	
 	String get_EL_PID(String);
 	int EL_motor_speed;
-	 
+	
 	
   
   
@@ -132,10 +149,7 @@ class Rotator {
 	//extern volatile int az_state;
 	void AZStateChange();
 	void ELStateChange();
-	void MadgwickQuaternionUpdate(float, float, float, float, float, float, float, float, float);
-	void readLSM9DSO();
-	void printHeading(float, float);
-	void printOrientation(float, float, float);
+	
 	//extern void stopIfFault();
 
 #endif

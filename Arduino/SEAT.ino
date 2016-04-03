@@ -14,19 +14,15 @@
 
 */
 #include <config.h>
-//#include <VNH5019MotorShield.h>
 #include <DuePWM.h>
-//#include <PID_v1.h>
 #include <SPI.h>
 #include <Ethernet2.h>
 #include <Adafruit_GPS.h>
 #include <rtc_clock.h>
 #include <Rotator.h>
 #include <Wire.h>
-
-
-
-
+#include <SD.h>
+#include <Adafruit_BNO055.h>
 
 uint32_t timer = millis();
 uint32_t displaytimer = millis();
@@ -70,11 +66,14 @@ float voltage;
 
 float EL_target_deg;
 
+boolean positionsaved = true;  //Flag to let us know if the el/az position has been saved to the SD card
+
 float EL_prev_target_deg = 0;
 float AZ_absolute_pos;    //This is to allow a pass from more than zero to cross over zero, and to the 350s and below.
 //The encoder state and current position will go negative, but this var will be the absolute AZ heading
 //This is what is returned to the tracking app
 
+int last_az, last_el;
 
 //boolean is_tracking = false;//Are we actively tracking
 //boolean is_parking = false; //Flag for when we are parking (blocking)
@@ -88,6 +87,10 @@ unsigned long admin_report_last_time = 0;
 
 unsigned long EZ_prev_set_time;
 unsigned long last_cmd_time;
+
+String caldata;
+
+String rotatorstatus = "initializing";
 
 
 //int motor_speed = 80;
@@ -160,9 +163,29 @@ void setup()
   delay(1000);
   //**GPS**********
 
-
+  Serial.print("Initializing SD card...");
+  // On the Ethernet Shield, CS is pin 4. It's set as an output by default.
+  // Note that even if it's not used as the CS pin, the hardware SS pin 
+  // (10 on most Arduino boards, 53 on the Mega) must be left as an output 
+  // or the SD library functions will not work. 
+  pinMode(10, OUTPUT);
+  //disconnect the ethernet controller
+  digitalWrite(10,HIGH);
   
+  //SD card
+  pinMode(4,OUTPUT); 
+  if (!SD.begin(4)) {
+    Serial.println("initialization failed!");
+    return;
+  }
 
+  getLastPosition();
+  getDOFCalibrationData();
+
+  // disconnect the SD card
+  digitalWrite(4, HIGH);
+  digitalWrite(10,LOW);
+  delay(500);
 
   //Ethernet
   Ethernet.begin(mac, ip, gateway, subnet);
@@ -170,7 +193,9 @@ void setup()
   server.begin();
   adminserver.begin();
   webserver.begin();
-  ROT.init();
+  Serial.print("server is at ");
+  Serial.println(Ethernet.localIP());
+  ROT.init(last_az, last_el, caldata);
   
  
 #ifdef __arm__
@@ -182,6 +207,9 @@ void setup()
   delay(1000);
   // Ask for firmware version
   gpsSerial.println(PMTK_Q_RELEASE);
+  
+  
+  
 }
 
 #ifdef __AVR__
@@ -220,7 +248,9 @@ void loop()
   //prevstate = state;
   
 
-  if (!ROT.is_rot_tracking() && !ROT.is_rot_parking()) {
+  
+  if (!ROT.is_rot_moving()) {
+    
     readGPS();
   }
 
@@ -280,7 +310,17 @@ void loop()
              webclient.println(getWebPage());
           } else {
             //Prob got some data
-            processWebRequest(HTTPHeader.substring(pos+2));
+            if (HTTPHeader.indexOf('PID') > 0 ){
+              processPIDWebRequest(HTTPHeader.substring(pos+2));
+            } else if (HTTPHeader.indexOf('calibrate') > 0 ){
+              if (ROT.calibrateToZero() == true){
+                rotatorstatus = "calibrated";
+              } else {
+                rotatorstatus = "NOT calibrated";
+              }
+            }
+            
+            
             String url = "http://" + localip;
             Serial.println(url);
             String data = "<meta http-equiv=";
@@ -520,6 +560,7 @@ void loop()
         client.print("0\n");
         
         ROT.processPosition();
+        
 
 
       }
@@ -537,10 +578,10 @@ void loop()
 
   
   //cnt++;
-  if (displaytimer > millis())  displaytimer = millis();
+  //if (displaytimer > millis())  displaytimer = millis();
 
   // approximately every 1 second, print out the current stats
-  if (millis() - displaytimer > 1000) {
+  if (millis() > displaytimer + 1000) {
     displaytimer = millis(); // reset the timer
     //Serial.print("Encoder count: ");
     //Serial.println(state);
@@ -556,8 +597,17 @@ void loop()
     Serial.println(ROT.get_el_current_deg());
     Serial.print("Target EL position: ");
     Serial.println(ROT.get_el_target_deg());
-    
-    //Serial.print("Motor speed: ");
+    Serial.print("Mag EL: ");
+    Serial.println(ROT.getMagEL());
+    Serial.print("Heading: ");
+    Serial.println(ROT.getMagHeading());
+    //Serial.print("\nSensor Offsets");
+    //ROT.displaySensorOffsets();
+    //Serial.print("\nCalibration Status:");
+    //ROT.displayCalStatus();
+    //Serial.print("\nSensor Status:");
+    //ROT.displaySensorStatus();
+        //Serial.print("Motor speed: ");
     //Serial.println(motor_speed);
     //Serial.print("Forward direction: ");
     //Serial.println(String(AZ_forward_dir));
@@ -585,10 +635,23 @@ void loop()
     Serial.print(".");
     Serial.println(rtc_clock.get_years());
     */
+    displaytimer = millis();
   }
 
 
+  
   ROT.processPosition();
+  //If we are moving and position has been saved, then flag the position as not saved so later when we stop moving we can then save
+  if (ROT.is_rot_moving() && positionsaved){
+    positionsaved = false;
+  }
+  
+  if (!positionsaved){
+    if (!ROT.is_rot_moving()){
+      //So we aren't moving and we need to save the current position
+      saveAZELPosition();
+    }
+  }
   
   if (millis() - last_cmd_time > DISABLE_TRACKING_DELAY && last_cmd_time > 0) {
     Serial.println("Turning tracking off");
@@ -598,6 +661,7 @@ void loop()
 
     
     ROT.park();
+    
     //EL.park();
     //is_parking = false;
     last_cmd_time = 0;
@@ -658,11 +722,13 @@ void readGPS() {
       Serial.print("Satellites: "); Serial.println((int)GPS.satellites);
       */
     }
+    
   }
 
 }
 
 String getWebPage(){
+  adafruit_bno055_offsets_t caldata = ROT.getSensorOffsets();
   String webdata = "<!doctype html>";
   webdata = webdata + "<html>";
   webdata = webdata + "<head>";
@@ -671,7 +737,14 @@ String getWebPage(){
   webdata = webdata + "<body>";
   webdata = webdata + "<h1>SEAT Controller</h1>";
   //webdata = webdata + '';
-  webdata = webdata + "<p>Last Status Message - All OK</p>";
+  webdata = webdata + "<p>Last Status Message - " + rotatorstatus + "</p>";
+  webdata = webdata + "<p>" + rtc_clock.get_hours() + ":" + rtc_clock.get_minutes() + ":" + rtc_clock.get_seconds() + "</p>";
+  webdata = webdata + "<p>" + ROT.getCalStatus() + "</p>";
+  webdata = webdata + "<p>Accelerometer: " + caldata.accel_offset_x + " " + caldata.accel_offset_y + " " + caldata.accel_offset_z + "</p>";
+  webdata = webdata + "<p>Gyro: " + caldata.gyro_offset_x + " " + caldata.gyro_offset_y + " " + caldata.gyro_offset_z + "</p>";
+  webdata = webdata + "<p>Mag: " + caldata.mag_offset_x + " " + caldata.mag_offset_y + " " + caldata.mag_offset_z + "</p>";
+  webdata = webdata + "<p>Accel Radius: " + caldata.accel_radius + "</p>";
+  webdata = webdata + "<p>Mag Radius: " + caldata.mag_radius + "</p>";
   //webdata = webdata + '';
   webdata = webdata + "<table border=" + '"' + "1" + '"' + " cellpadding=" + '"' + "1" + '"' + " cellspacing=" + '"' + "1" + '"' + "style=" + '"' + "width: 500px;" + '"' + ">";
   webdata = webdata + "	<tbody>";
@@ -754,7 +827,8 @@ String getWebPage(){
 
 }
 
-void processWebRequest(String data){
+
+void processPIDWebRequest(String data){
   Serial.println("Got Data!: " + data);
   //Got Data!: AZ-Kp=22&AZ-Ki=0.01&AZ-Kd=0.05&EL-Kp=20&EL-Ki=0.01&EL-Kd=0.05&UpdatePID=Update+PID+Values HTTP/1.1
 
@@ -779,8 +853,106 @@ void processWebRequest(String data){
 }
 
 
+void getLastPosition(void){
+  File myFile;
+  char c;
+  String data;
+  // open the file for reading:
+  myFile = SD.open("lastpos.txt");
+  if (myFile) {
+    //Serial.println("lastpos.txt:");
+    
+    // read from the file until there's nothing else in it:
+    while (myFile.available()) {
+      
+      c = myFile.read();
+      data = data + c;
+      Serial.println(data);
+      //Serial.write(myFile.read());
+    }
+    // close the file:
+    myFile.close();
+  } else {
+    // if the file didn't open, print an error:
+    //Serial.println("error opening lastpos.txt");
+    c = 0;
+  }
+  Serial.println(data);
+  
+  int pos = data.indexOf(",");
+  last_az = data.substring(0,pos).toFloat();
+  last_el = data.substring(pos+1).toFloat();
+  
+  
+}
 
+void getDOFCalibrationData(void){
+  File myFile;
+  char c;
+  
+  // open the file for reading:
+  myFile = SD.open("caldata.txt");
+  if (myFile) {
+    //Serial.println("lastpos.txt:");
+    
+    // read from the file until there's nothing else in it:
+    while (myFile.available()) {
+      
+      c = myFile.read();
+      caldata = caldata + c;
+      //Serial.println(caldata);
+      //Serial.write(myFile.read());
+    }
+    // close the file:
+    myFile.close();
+  } else {
+    // if the file didn't open, print an error:
+    Serial.println("error opening caldata.txt");
+    c = 0;
+  }
+  Serial.println(caldata);
+  
+}
 
+void saveAZELPosition(void){
+  Serial.println("Saving position...");
+  //We must shut down ethernet so we can write to the SD card and do the saving
+  //pinMode(10, OUTPUT);
+  //disconnect the ethernet controller
+  digitalWrite(10,HIGH);
+  digitalWrite(4,LOW);
+  
+  //SD card
+  //pinMode(4,OUTPUT); 
+  //if (!SD.begin(4)) {
+  //  Serial.println("SD activation failed!");
+  //  return;
+  //}
+  
+  
+  File myFile;
+  String val;
+  String data;
+  // open the file for reading:
+  val = String(ROT.getAZEncoderCount()) + "," + String(ROT.getELEncoderCount());
+  
+  myFile = SD.open("lastpos.txt", FILE_WRITE);
+  Serial.println("Saving " + val);
+  if (myFile) {
+    //az,el
+    myFile.println(val);
+    
+  }
+  
+  myFile.close();
+  // disconnect the SD card
+  digitalWrite(4, HIGH);
+  digitalWrite(10,LOW);
+  delay(500);
+  
+  Serial.println("Saved position");
+  positionsaved = true; //Saved, so save no more, untill it's not
+}
 
 
 
